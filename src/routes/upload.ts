@@ -43,6 +43,10 @@ const readCookie = (cookieHeader: string | undefined, name: string): string | un
   return undefined;
 };
 
+const delay = async (ms: number): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+};
+
 const renderUploadPage = (): string => `<!doctype html>
 <html lang="es">
   <head>
@@ -228,7 +232,8 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
 
     const orders = formatOrders(parseResult.parsedOrders, channel);
     const sheetsService = new SheetsService();
-    const existingOrderNumbers = await sheetsService.getExistingOrderNumbers();
+    const beforeLookup = await sheetsService.getExistingOrderNumbersLookup();
+    const existingOrderNumbers = beforeLookup.orderNumbers;
     const duplicates = findDuplicates(orders, existingOrderNumbers);
     const confirm = String(req.query.confirm || "false").toLowerCase() === "true";
 
@@ -244,15 +249,69 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
 
     await sheetsService.appendOrders(orders);
 
+    const verifyWrite = String(req.query.verify || "true").toLowerCase() !== "false";
+    let verification: { status: "verified" | "skipped"; message?: string; attempts?: number } = { status: "skipped" };
+    const existingBeforeSet = new Set(existingOrderNumbers);
+    const expectedNewOrders = orders
+      .map((order) => order.orderNumber)
+      .filter((orderNumber) => !existingBeforeSet.has(orderNumber));
+
+    if (!verifyWrite) {
+      verification = {
+        status: "skipped",
+        message: "Write verification skipped by query parameter (?verify=false) for manual integration testing."
+      };
+    } else if (expectedNewOrders.length === 0) {
+      verification = { status: "verified", attempts: 0 };
+    } else if (beforeLookup.source !== "none") {
+      const maxAttempts = 3;
+      const retryDelayMs = 1500;
+      let missingOrderNumbers = expectedNewOrders;
+      let attemptsUsed = 0;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const afterLookup = await sheetsService.getExistingOrderNumbersLookup();
+        if (afterLookup.source === "none") {
+          break;
+        }
+
+        const existingAfterSet = new Set(afterLookup.orderNumbers);
+        missingOrderNumbers = expectedNewOrders.filter((orderNumber) => !existingAfterSet.has(orderNumber));
+        attemptsUsed = attempt;
+
+        if (missingOrderNumbers.length === 0) {
+          verification = { status: "verified", attempts: attemptsUsed };
+          break;
+        }
+
+        if (attempt < maxAttempts) {
+          await delay(retryDelayMs);
+        }
+      }
+
+      if (verification.status !== "verified") {
+        throw new Error(
+          `Append verification failed. ${missingOrderNumbers.length} orders were not found in sheet after write. First missing order: ${missingOrderNumbers[0]}`
+        );
+      }
+    } else {
+      verification = {
+        status: "skipped",
+        message:
+          "Write verification skipped because current configuration cannot read existing orders. Add Apps Script action getExistingOrderNumbers or configure service-account fallback."
+      };
+    }
+
     return res.json({
       inserted: orders.length,
       duplicates,
       unknownProducts: [],
+      verification,
       timeMs: Date.now() - startedAt
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected error";
-    const status = message.includes("Unsupported channel parser") ? 400 : 500;
+    const status = message.includes("Unsupported channel parser") ? 400 : message.includes("Append verification failed") ? 502 : 500;
 
     return res.status(status).json({
       message,

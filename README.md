@@ -122,6 +122,7 @@ When `GOOGLE_SCRIPT_URL` is set, this app calls:
 - Accepts only `.xlsx` files
 - Size limit: 5MB
 - Optional query: `?confirm=true` to proceed when duplicates exist
+- Optional query: `?verify=false` to skip post-write verification (useful for manual Postman/integration diagnostics)
 - Optional body field: `channel` (default `PedidosYa`)
 
 ### Response
