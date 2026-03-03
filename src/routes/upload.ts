@@ -97,8 +97,7 @@ const renderUploadPage = (): string => `<!doctype html>
         <input id="channelInput" type="hidden" name="channel" value="PedidosYa" />
 
         <button type="submit">Procesar archivo</button>
-        <p class="note">No hace falta ingresar APP Secret en pantalla; la sesión UI queda autorizada desde el servidor.</p>
-        <div id="result"></div>
+                <div id="result"></div>
       </form>
     </div>
 
