@@ -17,26 +17,25 @@ export class SheetsService {
     this.tabName = process.env.GOOGLE_SHEETS_TAB_NAME || "VentasPeYa";
     this.scriptUrl = process.env.GOOGLE_SCRIPT_URL;
 
-    if (this.scriptUrl) {
-      return;
-    }
-
     const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
     const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
 
-    if (!clientEmail || !privateKey || !this.spreadsheetId) {
+    // Initialize Sheets API fallback whenever credentials exist.
+    if (clientEmail && privateKey && this.spreadsheetId) {
+      const auth = new google.auth.JWT({
+        email: clientEmail,
+        key: privateKey,
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+      });
+
+      this.sheets = google.sheets({ version: "v4", auth });
+    }
+
+    if (!this.scriptUrl && !this.sheets) {
       throw new Error(
         "Missing Sheets configuration. Set GOOGLE_SCRIPT_URL or service account vars (GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY, GOOGLE_SHEETS_SPREADSHEET_ID)."
       );
     }
-
-    const auth = new google.auth.JWT({
-      email: clientEmail,
-      key: privateKey,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"]
-    });
-
-    this.sheets = google.sheets({ version: "v4", auth });
   }
 
   private parseOrderNumbers(payload: ScriptGetOrdersResponse): number[] {
@@ -44,24 +43,21 @@ export class SheetsService {
     return values.map((row) => Number(row)).filter((value) => Number.isFinite(value));
   }
 
-  private async getOrderNumbersViaScript(): Promise<number[]> {
+  private async getOrderNumbersViaScript(): Promise<number[] | undefined> {
     if (!this.scriptUrl) {
-      return [];
+      return undefined;
     }
 
-    // Try GET first (for doGet-based scripts).
     const getUrl = new URL(this.scriptUrl);
     getUrl.searchParams.set("action", "getExistingOrderNumbers");
     getUrl.searchParams.set("tabName", this.tabName);
 
     const getResponse = await fetch(getUrl.toString());
-
     if (getResponse.ok) {
       const data = (await getResponse.json()) as ScriptGetOrdersResponse;
       return this.parseOrderNumbers(data);
     }
 
-    // Fallback to POST JSON (for doPost-based scripts with action routing).
     const postJsonResponse = await fetch(this.scriptUrl, {
       method: "POST",
       headers: {
@@ -78,7 +74,6 @@ export class SheetsService {
       return this.parseOrderNumbers(data);
     }
 
-    // Fallback to POST form-encoded parameters for scripts using only e.parameter.
     const formBody = new URLSearchParams({
       action: "getExistingOrderNumbers",
       tabName: this.tabName
@@ -97,27 +92,28 @@ export class SheetsService {
       return this.parseOrderNumbers(data);
     }
 
-    // Do not hard fail upload when duplicates endpoint isn't implemented in Apps Script.
-    return [];
+    return undefined;
   }
 
   async getExistingOrderNumbers(): Promise<number[]> {
-    if (this.scriptUrl) {
-      return this.getOrderNumbersViaScript();
+    const fromScript = await this.getOrderNumbersViaScript();
+    if (fromScript) {
+      return fromScript;
     }
 
-    if (!this.sheets) {
-      throw new Error("Sheets client not initialized");
+    if (this.sheets) {
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: this.spreadsheetId,
+        range: `${this.tabName}!A:A`
+      });
+
+      const values = response.data.values || [];
+      return values.map((row) => Number(row[0])).filter((value) => Number.isFinite(value));
     }
 
-    const response = await this.sheets.spreadsheets.values.get({
-      spreadsheetId: this.spreadsheetId,
-      range: `${this.tabName}!A:A`
-    });
-
-    const values = response.data.values || [];
-
-    return values.map((row) => Number(row[0])).filter((value) => Number.isFinite(value));
+    // If script duplicate endpoint does not exist and API fallback is unavailable,
+    // continue without duplicates instead of failing the entire upload.
+    return [];
   }
 
   private toLegacyScriptPayload(order: Order) {
@@ -134,49 +130,9 @@ export class SheetsService {
     };
   }
 
-  async appendOrders(orders: Order[]): Promise<void> {
-    if (orders.length === 0) {
-      return;
-    }
-
-    if (this.scriptUrl) {
-      // Attempt modern batch payload first.
-      const batchResponse = await fetch(this.scriptUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          action: "appendOrders",
-          tabName: this.tabName,
-          orders
-        })
-      });
-
-      if (batchResponse.ok) {
-        return;
-      }
-
-      // Fallback: compatible with current doPost script that appends one row from e.parameter/JSON fields.
-      for (const order of orders) {
-        const legacyResponse = await fetch(this.scriptUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(this.toLegacyScriptPayload(order))
-        });
-
-        if (!legacyResponse.ok) {
-          throw new Error(`Apps Script error appending orders: ${legacyResponse.status}`);
-        }
-      }
-
-      return;
-    }
-
+  private async appendViaSheetsApi(orders: Order[]): Promise<void> {
     if (!this.sheets) {
-      throw new Error("Sheets client not initialized");
+      throw new Error("Sheets API fallback unavailable");
     }
 
     const values = orders.map((order) => [
@@ -198,5 +154,101 @@ export class SheetsService {
         values
       }
     });
+  }
+
+  async appendOrders(orders: Order[]): Promise<void> {
+    if (orders.length === 0) {
+      return;
+    }
+
+    if (this.scriptUrl) {
+      const batchResponse = await fetch(this.scriptUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          action: "appendOrders",
+          tabName: this.tabName,
+          orders
+        })
+      });
+
+      if (batchResponse.ok) {
+        return;
+      }
+
+      // Legacy per-order JSON format (your current doPost parser).
+      let legacyFailedStatus: number | undefined;
+      for (const order of orders) {
+        const legacyResponse = await fetch(this.scriptUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(this.toLegacyScriptPayload(order))
+        });
+
+        if (!legacyResponse.ok) {
+          legacyFailedStatus = legacyResponse.status;
+          break;
+        }
+      }
+
+      if (!legacyFailedStatus) {
+        return;
+      }
+
+      // Extra fallback for scripts expecting form params only.
+      const firstOrder = orders[0];
+      const formResponse = await fetch(this.scriptUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: new URLSearchParams(
+          Object.entries(this.toLegacyScriptPayload(firstOrder)).reduce<Record<string, string>>((acc, [key, value]) => {
+            acc[key] = String(value);
+            return acc;
+          }, {})
+        ).toString()
+      });
+
+      if (formResponse.ok) {
+        // If form works, continue sending all orders as form-encoded rows.
+        for (const order of orders.slice(1)) {
+          const nextResponse = await fetch(this.scriptUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded"
+            },
+            body: new URLSearchParams(
+              Object.entries(this.toLegacyScriptPayload(order)).reduce<Record<string, string>>((acc, [key, value]) => {
+                acc[key] = String(value);
+                return acc;
+              }, {})
+            ).toString()
+          });
+
+          if (!nextResponse.ok) {
+            throw new Error(`Apps Script error appending orders: ${nextResponse.status}`);
+          }
+        }
+
+        return;
+      }
+
+      // Final fallback: if Apps Script endpoint is broken but service-account is configured, use API.
+      if (this.sheets) {
+        await this.appendViaSheetsApi(orders);
+        return;
+      }
+
+      throw new Error(
+        `Apps Script error appending orders: batch ${batchResponse.status}, legacy ${legacyFailedStatus}, form ${formResponse.status}. Verify GOOGLE_SCRIPT_URL (must be /exec deployed web app) or configure service-account fallback.`
+      );
+    }
+
+    await this.appendViaSheetsApi(orders);
   }
 }
