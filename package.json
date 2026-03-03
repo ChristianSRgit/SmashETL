@@ -1,6 +1,6 @@
 {
   "name": "smash-etl",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "PedidosYa sales report ETL to Google Sheets",
   "main": "dist/server.js",
   "scripts": {
@@ -19,10 +19,10 @@
   "license": "MIT",
   "dependencies": {
     "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
     "express": "^4.21.2",
     "googleapis": "^144.0.0",
-    "multer": "^1.4.5-lts.1",
-    "xlsx": "^0.18.5"
+    "multer": "^1.4.5-lts.1"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

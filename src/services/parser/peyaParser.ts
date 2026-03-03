@@ -1,25 +1,75 @@
-import xlsx from "xlsx";
+import ExcelJS from "exceljs";
 import { formatPedidosYaDate } from "../../utils/dateFormatter";
 import { normalizeOrderNumber } from "../../utils/orderNumber";
+import { parseAmount } from "../../utils/amountParser";
 import { normalizeProducts } from "../normalizer/productNormalizer";
 import { ParseResult, ParsedOrderData, RawOrderRow } from "../../types";
 
 export interface ChannelParser {
-  parse(buffer: Buffer): ParseResult;
+  parse(buffer: Buffer): Promise<ParseResult>;
 }
 
-class PedidosYaParser implements ChannelParser {
-  parse(buffer: Buffer): ParseResult {
-    const workbook = xlsx.read(buffer, { type: "buffer" });
-    const firstSheetName = workbook.SheetNames[0];
+const requiredHeaders: Array<keyof RawOrderRow> = [
+  "Nro de pedido",
+  "Fecha del pedido",
+  "Forma de pago",
+  "Total del pedido",
+  "Ingreso estimado",
+  "Artículos"
+];
 
-    if (!firstSheetName) {
+const cleanCellValue = (value: unknown): string => {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  return String(value).trim();
+};
+
+class PedidosYaParser implements ChannelParser {
+  async parse(buffer: Buffer): Promise<ParseResult> {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(buffer);
+    const worksheet = workbook.worksheets[0];
+
+    if (!worksheet) {
       throw new Error("XLSX file has no sheets");
     }
 
-    const worksheet = workbook.Sheets[firstSheetName];
-    const rows = xlsx.utils.sheet_to_json<RawOrderRow>(worksheet, {
-      defval: ""
+    const headerRow = worksheet.getRow(1);
+    const headers = headerRow.values.slice(1).map((header) => cleanCellValue(header));
+
+    for (const requiredHeader of requiredHeaders) {
+      if (!headers.includes(requiredHeader)) {
+        throw new Error(`Missing required column: ${requiredHeader}`);
+      }
+    }
+
+    const headerIndexMap = new Map<string, number>();
+    headers.forEach((name, index) => {
+      headerIndexMap.set(name, index + 1);
+    });
+
+    const rows: RawOrderRow[] = [];
+
+    worksheet.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) {
+        return;
+      }
+
+      const rowData: RawOrderRow = {
+        "Nro de pedido": cleanCellValue(row.getCell(headerIndexMap.get("Nro de pedido") || 1).value),
+        "Fecha del pedido": cleanCellValue(row.getCell(headerIndexMap.get("Fecha del pedido") || 1).value),
+        "Forma de pago": cleanCellValue(row.getCell(headerIndexMap.get("Forma de pago") || 1).value),
+        "Total del pedido": cleanCellValue(row.getCell(headerIndexMap.get("Total del pedido") || 1).value),
+        "Ingreso estimado": cleanCellValue(row.getCell(headerIndexMap.get("Ingreso estimado") || 1).value),
+        "Artículos": cleanCellValue(row.getCell(headerIndexMap.get("Artículos") || 1).value)
+      };
+
+      const isEmptyRow = Object.values(rowData).every((value) => String(value).trim() === "");
+      if (!isEmptyRow) {
+        rows.push(rowData);
+      }
     });
 
     const unknownProducts = new Set<string>();
@@ -33,8 +83,8 @@ class PedidosYaParser implements ChannelParser {
         orderNumber: normalizeOrderNumber(row["Nro de pedido"]),
         date: formatPedidosYaDate(String(row["Fecha del pedido"])),
         paymentMethod: String(row["Forma de pago"] || ""),
-        grossAmount: Number(row["Total del pedido"] || 0),
-        netAmount: Number(row["Ingreso estimado"] || 0),
+        grossAmount: parseAmount(row["Total del pedido"]),
+        netAmount: parseAmount(row["Ingreso estimado"]),
         burgerNames: normalized.normalizedNames,
         burgersQty: normalized.burgersQty
       });

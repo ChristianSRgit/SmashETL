@@ -5,7 +5,17 @@ import { formatOrders } from "../services/order/orderFormatter";
 import { SheetsService } from "../services/sheets/sheetsService";
 import { findDuplicates } from "../services/validator/duplicateChecker";
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const isXlsxMime =
+      file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+      file.originalname.toLowerCase().endsWith(".xlsx");
+
+    cb(isXlsxMime ? null : new Error("Only .xlsx files are allowed"), isXlsxMime);
+  }
+});
 
 export const uploadRouter = Router();
 
@@ -25,7 +35,7 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
 
     const channel = String(req.body.channel || "PedidosYa");
     const parser = getParser(channel);
-    const parseResult = parser.parse(req.file.buffer);
+    const parseResult = await parser.parse(req.file.buffer);
 
     if (parseResult.unknownProducts.length > 0) {
       return res.status(400).json({
@@ -40,7 +50,6 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
     const sheetsService = new SheetsService();
     const existingOrderNumbers = await sheetsService.getExistingOrderNumbers();
     const duplicates = findDuplicates(orders, existingOrderNumbers);
-
     const confirm = String(req.query.confirm || "false").toLowerCase() === "true";
 
     if (duplicates.length > 0 && !confirm) {
@@ -53,11 +62,10 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
       });
     }
 
-    const ordersToInsert = confirm ? orders : orders.filter((order) => !duplicates.includes(order.orderNumber));
-    await sheetsService.appendOrders(ordersToInsert);
+    await sheetsService.appendOrders(orders);
 
     return res.json({
-      inserted: ordersToInsert.length,
+      inserted: orders.length,
       duplicates,
       unknownProducts: [],
       timeMs: Date.now() - startedAt
