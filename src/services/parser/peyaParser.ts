@@ -9,14 +9,14 @@ export interface ChannelParser {
   parse(buffer: Buffer): Promise<ParseResult>;
 }
 
-const requiredHeaders: Array<keyof RawOrderRow> = [
+const requiredHeaders = [
   "Nro de pedido",
   "Fecha del pedido",
   "Forma de pago",
   "Total del pedido",
   "Ingreso estimado",
   "Artículos"
-];
+ ] as const;
 
 const cleanCellValue = (value: unknown): string => {
   if (value === null || value === undefined) {
@@ -25,6 +25,10 @@ const cleanCellValue = (value: unknown): string => {
 
   return String(value).trim();
 };
+
+interface MinimalWorksheetRow {
+  getCell(index: number): { value: unknown };
+}
 
 class PedidosYaParser implements ChannelParser {
   async parse(buffer: Buffer): Promise<ParseResult> {
@@ -37,7 +41,7 @@ class PedidosYaParser implements ChannelParser {
     }
 
     const headerRow = worksheet.getRow(1);
-    const headers = headerRow.values.slice(1).map((header) => cleanCellValue(header));
+    const headers = (headerRow.values as unknown[]).slice(1).map((header: unknown) => cleanCellValue(header));
 
     for (const requiredHeader of requiredHeaders) {
       if (!headers.includes(requiredHeader)) {
@@ -46,13 +50,13 @@ class PedidosYaParser implements ChannelParser {
     }
 
     const headerIndexMap = new Map<string, number>();
-    headers.forEach((name, index) => {
+    headers.forEach((name: string, index: number) => {
       headerIndexMap.set(name, index + 1);
     });
 
     const rows: RawOrderRow[] = [];
 
-    worksheet.eachRow((row, rowNumber) => {
+    worksheet.eachRow((row: MinimalWorksheetRow, rowNumber: number) => {
       if (rowNumber === 1) {
         return;
       }

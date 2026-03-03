@@ -13,7 +13,12 @@ const upload = multer({
       file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
       file.originalname.toLowerCase().endsWith(".xlsx");
 
-    cb(isXlsxMime ? null : new Error("Only .xlsx files are allowed"), isXlsxMime);
+    if (!isXlsxMime) {
+      cb(new Error("Only .xlsx files are allowed"));
+      return;
+    }
+
+    cb(null, true);
   }
 });
 
@@ -43,9 +48,13 @@ const renderUploadPage = (): string => `<!doctype html>
       .dropzone.active { border-color: #4f46e5; background: #eef2ff; }
       .channels { margin: 18px 0; display: flex; gap: 20px; flex-wrap: wrap; }
       .channel-option { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+      .field { margin: 12px 0; }
+      .field label { display: block; font-weight: 600; margin-bottom: 6px; }
+      .field input { width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 8px; padding: 10px; }
       button { border: 0; border-radius: 8px; background: #111827; color: white; padding: 12px 16px; cursor: pointer; }
       .note { color: #555; font-size: 14px; margin-top: 8px; }
       #filename { margin-top: 8px; font-weight: 600; }
+      #result { margin-top: 14px; font-size: 14px; white-space: pre-wrap; }
     </style>
   </head>
   <body>
@@ -67,18 +76,27 @@ const renderUploadPage = (): string => `<!doctype html>
           <label class="channel-option"><input type="checkbox" name="channelChoice" value="MercadoLibre" /> MercadoLibre</label>
         </div>
 
+        <div class="field">
+          <label for="appSecret">APP Secret (Authorization)</label>
+          <input id="appSecret" name="appSecret" type="password" placeholder="Ingresá tu APP_SECRET" required />
+        </div>
+
         <input id="channelInput" type="hidden" name="channel" value="PedidosYa" />
 
         <button type="submit">Procesar archivo</button>
-        <p class="note">Este formulario envía multipart/form-data al endpoint <code>POST /upload</code>.</p>
+        <p class="note">La UI envía la petición con header <code>Authorization</code> automáticamente.</p>
+        <div id="result"></div>
       </form>
     </div>
 
     <script>
+      const form = document.getElementById('uploadForm');
       const fileInput = document.getElementById('fileInput');
       const filename = document.getElementById('filename');
       const dropzone = document.getElementById('dropzone');
       const channelInput = document.getElementById('channelInput');
+      const appSecretInput = document.getElementById('appSecret');
+      const resultEl = document.getElementById('result');
       const checkboxes = Array.from(document.querySelectorAll('input[name="channelChoice"]'));
 
       const updateFilename = () => {
@@ -120,9 +138,49 @@ const renderUploadPage = (): string => `<!doctype html>
           }
         });
       });
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+
+        const appSecret = appSecretInput.value.trim();
+        if (!appSecret) {
+          resultEl.textContent = 'Debes ingresar APP_SECRET.';
+          return;
+        }
+
+        const formData = new FormData(form);
+
+        try {
+          const response = await fetch('/upload', {
+            method: 'POST',
+            headers: {
+              Authorization: appSecret
+            },
+            body: formData
+          });
+
+          const payload = await response.json();
+          resultEl.textContent = JSON.stringify(payload, null, 2);
+        } catch (error) {
+          resultEl.textContent = error instanceof Error ? error.message : 'Error inesperado';
+        }
+      });
     </script>
   </body>
 </html>`;
+
+const getAuthToken = (req: Request): string | undefined => {
+  const headerAuth = req.header("Authorization");
+  if (headerAuth) {
+    return headerAuth;
+  }
+
+  if (typeof req.body?.appSecret === "string") {
+    return req.body.appSecret;
+  }
+
+  return undefined;
+};
 
 export const uploadRouter = Router();
 
@@ -134,9 +192,9 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
   const startedAt = Date.now();
 
   try {
-    const authHeader = req.header("Authorization");
+    const authToken = getAuthToken(req);
 
-    if (!authHeader || authHeader !== process.env.APP_SECRET) {
+    if (!authToken || authToken !== process.env.APP_SECRET) {
       return res.status(401).json({ message: "Unauthorized" });
     }
 

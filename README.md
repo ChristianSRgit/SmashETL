@@ -112,6 +112,7 @@ When `GOOGLE_SCRIPT_URL` is set, this app calls:
 ### `GET /upload`
 
 - Renderiza una interfaz web simple para cargar archivo y seleccionar canal (checkbox único: PedidosYa/Rappi/MercadoLibre).
+- Incluye campo `APP Secret` y envía el header `Authorization` automáticamente para evitar `401 Unauthorized` al usar la UI.
 
 ### `POST /upload`
 
