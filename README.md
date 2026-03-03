@@ -112,11 +112,11 @@ When `GOOGLE_SCRIPT_URL` is set, this app calls:
 ### `GET /upload`
 
 - Renderiza una interfaz web simple para cargar archivo y seleccionar canal (checkbox único: PedidosYa/Rappi/MercadoLibre).
-- Incluye campo `APP Secret` y envía el header `Authorization` automáticamente para evitar `401 Unauthorized` al usar la UI.
+- No pide APP Secret en el frontend: el servidor habilita la sesión UI con cookie HttpOnly.
 
 ### `POST /upload`
 
-- Auth header: `Authorization: <APP_SECRET>`
+- Auth: `Authorization: <APP_SECRET>` **o** cookie de sesión UI generada por `GET /upload`.
 - Content type: `multipart/form-data`
 - File field name: `file`
 - Accepts only `.xlsx` files

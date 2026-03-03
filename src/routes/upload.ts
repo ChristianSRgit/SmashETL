@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { Router, Request, Response } from "express";
 import multer from "multer";
 import { getParser } from "../services/parser/peyaParser";
@@ -21,6 +22,26 @@ const upload = multer({
     cb(null, true);
   }
 });
+
+const buildUiAuthToken = (secret: string): string => {
+  return createHash("sha256").update(secret).digest("hex");
+};
+
+const readCookie = (cookieHeader: string | undefined, name: string): string | undefined => {
+  if (!cookieHeader) {
+    return undefined;
+  }
+
+  const entries = cookieHeader.split(";").map((chunk) => chunk.trim());
+  for (const entry of entries) {
+    const [key, ...rest] = entry.split("=");
+    if (key === name) {
+      return decodeURIComponent(rest.join("="));
+    }
+  }
+
+  return undefined;
+};
 
 const renderUploadPage = (): string => `<!doctype html>
 <html lang="es">
@@ -48,9 +69,6 @@ const renderUploadPage = (): string => `<!doctype html>
       .dropzone.active { border-color: #4f46e5; background: #eef2ff; }
       .channels { margin: 18px 0; display: flex; gap: 20px; flex-wrap: wrap; }
       .channel-option { display: flex; align-items: center; gap: 8px; font-weight: 600; }
-      .field { margin: 12px 0; }
-      .field label { display: block; font-weight: 600; margin-bottom: 6px; }
-      .field input { width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 8px; padding: 10px; }
       button { border: 0; border-radius: 8px; background: #111827; color: white; padding: 12px 16px; cursor: pointer; }
       .note { color: #555; font-size: 14px; margin-top: 8px; }
       #filename { margin-top: 8px; font-weight: 600; }
@@ -76,15 +94,10 @@ const renderUploadPage = (): string => `<!doctype html>
           <label class="channel-option"><input type="checkbox" name="channelChoice" value="MercadoLibre" /> MercadoLibre</label>
         </div>
 
-        <div class="field">
-          <label for="appSecret">APP Secret (Authorization)</label>
-          <input id="appSecret" name="appSecret" type="password" placeholder="Ingresá tu APP_SECRET" required />
-        </div>
-
         <input id="channelInput" type="hidden" name="channel" value="PedidosYa" />
 
         <button type="submit">Procesar archivo</button>
-        <p class="note">La UI envía la petición con header <code>Authorization</code> automáticamente.</p>
+        <p class="note">No hace falta ingresar APP Secret en pantalla; la sesión UI queda autorizada desde el servidor.</p>
         <div id="result"></div>
       </form>
     </div>
@@ -95,7 +108,6 @@ const renderUploadPage = (): string => `<!doctype html>
       const filename = document.getElementById('filename');
       const dropzone = document.getElementById('dropzone');
       const channelInput = document.getElementById('channelInput');
-      const appSecretInput = document.getElementById('appSecret');
       const resultEl = document.getElementById('result');
       const checkboxes = Array.from(document.querySelectorAll('input[name="channelChoice"]'));
 
@@ -142,21 +154,13 @@ const renderUploadPage = (): string => `<!doctype html>
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
 
-        const appSecret = appSecretInput.value.trim();
-        if (!appSecret) {
-          resultEl.textContent = 'Debes ingresar APP_SECRET.';
-          return;
-        }
-
         const formData = new FormData(form);
 
         try {
           const response = await fetch('/upload', {
             method: 'POST',
-            headers: {
-              Authorization: appSecret
-            },
-            body: formData
+            body: formData,
+            credentials: 'same-origin'
           });
 
           const payload = await response.json();
@@ -169,22 +173,32 @@ const renderUploadPage = (): string => `<!doctype html>
   </body>
 </html>`;
 
-const getAuthToken = (req: Request): string | undefined => {
+const isAuthorizedRequest = (req: Request): boolean => {
+  const secret = process.env.APP_SECRET;
+
+  if (!secret) {
+    return false;
+  }
+
   const headerAuth = req.header("Authorization");
-  if (headerAuth) {
-    return headerAuth;
+  if (headerAuth && headerAuth === secret) {
+    return true;
   }
 
-  if (typeof req.body?.appSecret === "string") {
-    return req.body.appSecret;
-  }
-
-  return undefined;
+  const uiCookie = readCookie(req.header("cookie"), "smash_ui_auth");
+  return uiCookie === buildUiAuthToken(secret);
 };
 
 export const uploadRouter = Router();
 
 uploadRouter.get("/upload", (_req: Request, res: Response) => {
+  const secret = process.env.APP_SECRET;
+
+  if (secret) {
+    const token = buildUiAuthToken(secret);
+    res.setHeader("Set-Cookie", `smash_ui_auth=${token}; Path=/; HttpOnly; SameSite=Lax`);
+  }
+
   res.type("html").send(renderUploadPage());
 });
 
@@ -192,9 +206,7 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
   const startedAt = Date.now();
 
   try {
-    const authToken = getAuthToken(req);
-
-    if (!authToken || authToken !== process.env.APP_SECRET) {
+    if (!isAuthorizedRequest(req)) {
       return res.status(401).json({ message: "Unauthorized" });
     }
 

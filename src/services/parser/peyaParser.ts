@@ -9,14 +9,26 @@ export interface ChannelParser {
   parse(buffer: Buffer): Promise<ParseResult>;
 }
 
-const requiredHeaders = [
+const headerAliases: Record<string, keyof RawOrderRow> = {
+  "nro de pedido": "Nro de pedido",
+  "nº de pedido": "Nro de pedido",
+  "numero de pedido": "Nro de pedido",
+  "fecha del pedido": "Fecha del pedido",
+  "forma de pago": "Forma de pago",
+  "total del pedido": "Total del pedido",
+  "ingreso estimado": "Ingreso estimado",
+  "articulos": "Artículos",
+  "artículos": "Artículos"
+};
+
+const requiredHeaders: Array<keyof RawOrderRow> = [
   "Nro de pedido",
   "Fecha del pedido",
   "Forma de pago",
   "Total del pedido",
   "Ingreso estimado",
   "Artículos"
- ] as const;
+];
 
 const cleanCellValue = (value: unknown): string => {
   if (value === null || value === undefined) {
@@ -26,9 +38,45 @@ const cleanCellValue = (value: unknown): string => {
   return String(value).trim();
 };
 
+const normalizeHeader = (value: string): string => {
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
+};
+
 interface MinimalWorksheetRow {
+  values: unknown[];
   getCell(index: number): { value: unknown };
 }
+
+interface HeaderRowInfo {
+  rowNumber: number;
+  headerIndexMap: Map<keyof RawOrderRow, number>;
+}
+
+const findHeaderRow = (worksheet: { getRow(index: number): MinimalWorksheetRow }): HeaderRowInfo => {
+  for (let rowNumber = 1; rowNumber <= 20; rowNumber += 1) {
+    const row = worksheet.getRow(rowNumber);
+    const values = (row.values as unknown[]).slice(1).map((value) => cleanCellValue(value));
+    const map = new Map<keyof RawOrderRow, number>();
+
+    values.forEach((rawHeader, index) => {
+      const canonical = headerAliases[normalizeHeader(rawHeader)];
+      if (canonical && !map.has(canonical)) {
+        map.set(canonical, index + 1);
+      }
+    });
+
+    if (requiredHeaders.every((header) => map.has(header))) {
+      return { rowNumber, headerIndexMap: map };
+    }
+  }
+
+  throw new Error("Missing required columns in XLSX header row");
+};
 
 class PedidosYaParser implements ChannelParser {
   async parse(buffer: Buffer): Promise<ParseResult> {
@@ -40,24 +88,12 @@ class PedidosYaParser implements ChannelParser {
       throw new Error("XLSX file has no sheets");
     }
 
-    const headerRow = worksheet.getRow(1);
-    const headers = (headerRow.values as unknown[]).slice(1).map((header: unknown) => cleanCellValue(header));
-
-    for (const requiredHeader of requiredHeaders) {
-      if (!headers.includes(requiredHeader)) {
-        throw new Error(`Missing required column: ${requiredHeader}`);
-      }
-    }
-
-    const headerIndexMap = new Map<string, number>();
-    headers.forEach((name: string, index: number) => {
-      headerIndexMap.set(name, index + 1);
-    });
+    const { rowNumber: headerRowNumber, headerIndexMap } = findHeaderRow(worksheet as unknown as { getRow(index: number): MinimalWorksheetRow });
 
     const rows: RawOrderRow[] = [];
 
     worksheet.eachRow((row: MinimalWorksheetRow, rowNumber: number) => {
-      if (rowNumber === 1) {
+      if (rowNumber <= headerRowNumber) {
         return;
       }
 
