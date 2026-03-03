@@ -43,6 +43,10 @@ const readCookie = (cookieHeader: string | undefined, name: string): string | un
   return undefined;
 };
 
+const delay = async (ms: number): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+};
+
 const renderUploadPage = (): string => `<!doctype html>
 <html lang="es">
   <head>
@@ -245,33 +249,50 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
 
     await sheetsService.appendOrders(orders);
 
-    let verification: { status: "verified" | "skipped"; message?: string } = { status: "skipped" };
+    const verifyWrite = String(req.query.verify || "true").toLowerCase() !== "false";
+    let verification: { status: "verified" | "skipped"; message?: string; attempts?: number } = { status: "skipped" };
     const existingBeforeSet = new Set(existingOrderNumbers);
     const expectedNewOrders = orders
       .map((order) => order.orderNumber)
       .filter((orderNumber) => !existingBeforeSet.has(orderNumber));
 
-    if (expectedNewOrders.length === 0) {
-      verification = { status: "verified" };
+    if (!verifyWrite) {
+      verification = {
+        status: "skipped",
+        message: "Write verification skipped by query parameter (?verify=false) for manual integration testing."
+      };
+    } else if (expectedNewOrders.length === 0) {
+      verification = { status: "verified", attempts: 0 };
     } else if (beforeLookup.source !== "none") {
-      const afterLookup = await sheetsService.getExistingOrderNumbersLookup();
-      if (afterLookup.source !== "none") {
-        const existingAfterSet = new Set(afterLookup.orderNumbers);
-        const missingOrderNumbers = expectedNewOrders.filter((orderNumber) => !existingAfterSet.has(orderNumber));
+      const maxAttempts = 3;
+      const retryDelayMs = 1500;
+      let missingOrderNumbers = expectedNewOrders;
+      let attemptsUsed = 0;
 
-        if (missingOrderNumbers.length > 0) {
-          throw new Error(
-            `Append verification failed. ${missingOrderNumbers.length} orders were not found in sheet after write. First missing order: ${missingOrderNumbers[0]}`
-          );
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const afterLookup = await sheetsService.getExistingOrderNumbersLookup();
+        if (afterLookup.source === "none") {
+          break;
         }
 
-        verification = { status: "verified" };
-      } else {
-        verification = {
-          status: "skipped",
-          message:
-            "Write verification skipped because current configuration cannot read existing orders. Add Apps Script action getExistingOrderNumbers or configure service-account fallback."
-        };
+        const existingAfterSet = new Set(afterLookup.orderNumbers);
+        missingOrderNumbers = expectedNewOrders.filter((orderNumber) => !existingAfterSet.has(orderNumber));
+        attemptsUsed = attempt;
+
+        if (missingOrderNumbers.length === 0) {
+          verification = { status: "verified", attempts: attemptsUsed };
+          break;
+        }
+
+        if (attempt < maxAttempts) {
+          await delay(retryDelayMs);
+        }
+      }
+
+      if (verification.status !== "verified") {
+        throw new Error(
+          `Append verification failed. ${missingOrderNumbers.length} orders were not found in sheet after write. First missing order: ${missingOrderNumbers[0]}`
+        );
       }
     } else {
       verification = {
