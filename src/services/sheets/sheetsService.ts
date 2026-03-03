@@ -3,7 +3,6 @@ import { Order } from "../../types";
 
 interface ScriptGetOrdersResponse {
   orderNumbers?: Array<number | string>;
-  ok?: boolean;
 }
 
 const isDecoderKeyError = (error: unknown): boolean => {
@@ -12,6 +11,20 @@ const isDecoderKeyError = (error: unknown): boolean => {
   }
 
   return error.message.includes("DECODER routines::unsupported") || error.message.includes("error:1E08010C");
+};
+
+const scriptUrlVariants = (rawUrl: string): string[] => {
+  const urls = new Set<string>([rawUrl]);
+
+  if (rawUrl.includes("/exec")) {
+    urls.add(rawUrl.replace("/exec", "/dev"));
+  }
+
+  if (rawUrl.includes("/dev")) {
+    urls.add(rawUrl.replace("/dev", "/exec"));
+  }
+
+  return Array.from(urls);
 };
 
 export class SheetsService {
@@ -28,7 +41,6 @@ export class SheetsService {
     const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
     const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
 
-    // Initialize Sheets API fallback only if credentials are present and valid.
     if (clientEmail && privateKey && this.spreadsheetId) {
       try {
         const auth = new google.auth.JWT({
@@ -39,7 +51,6 @@ export class SheetsService {
 
         this.sheets = google.sheets({ version: "v4", auth });
       } catch {
-        // Ignore invalid service-account key errors when Apps Script URL mode is available.
         this.sheets = undefined;
       }
     }
@@ -61,48 +72,52 @@ export class SheetsService {
       return undefined;
     }
 
-    const getUrl = new URL(this.scriptUrl);
-    getUrl.searchParams.set("action", "getExistingOrderNumbers");
-    getUrl.searchParams.set("tabName", this.tabName);
+    const variants = scriptUrlVariants(this.scriptUrl);
 
-    const getResponse = await fetch(getUrl.toString());
-    if (getResponse.ok) {
-      const data = (await getResponse.json()) as ScriptGetOrdersResponse;
-      return this.parseOrderNumbers(data);
-    }
+    for (const url of variants) {
+      const getUrl = new URL(url);
+      getUrl.searchParams.set("action", "getExistingOrderNumbers");
+      getUrl.searchParams.set("tabName", this.tabName);
 
-    const postJsonResponse = await fetch(this.scriptUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
+      const getResponse = await fetch(getUrl.toString());
+      if (getResponse.ok) {
+        const data = (await getResponse.json()) as ScriptGetOrdersResponse;
+        return this.parseOrderNumbers(data);
+      }
+
+      const postJsonResponse = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          action: "getExistingOrderNumbers",
+          tabName: this.tabName
+        })
+      });
+
+      if (postJsonResponse.ok) {
+        const data = (await postJsonResponse.json()) as ScriptGetOrdersResponse;
+        return this.parseOrderNumbers(data);
+      }
+
+      const formBody = new URLSearchParams({
         action: "getExistingOrderNumbers",
         tabName: this.tabName
-      })
-    });
+      });
 
-    if (postJsonResponse.ok) {
-      const data = (await postJsonResponse.json()) as ScriptGetOrdersResponse;
-      return this.parseOrderNumbers(data);
-    }
+      const postFormResponse = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: formBody.toString()
+      });
 
-    const formBody = new URLSearchParams({
-      action: "getExistingOrderNumbers",
-      tabName: this.tabName
-    });
-
-    const postFormResponse = await fetch(this.scriptUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body: formBody.toString()
-    });
-
-    if (postFormResponse.ok) {
-      const data = (await postFormResponse.json()) as ScriptGetOrdersResponse;
-      return this.parseOrderNumbers(data);
+      if (postFormResponse.ok) {
+        const data = (await postFormResponse.json()) as ScriptGetOrdersResponse;
+        return this.parseOrderNumbers(data);
+      }
     }
 
     return undefined;
@@ -179,77 +194,88 @@ export class SheetsService {
     }
 
     if (this.scriptUrl) {
-      const batchResponse = await fetch(this.scriptUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          action: "appendOrders",
-          tabName: this.tabName,
-          orders
-        })
-      });
+      const variants = scriptUrlVariants(this.scriptUrl);
+      let lastBatchStatus = 0;
+      let lastLegacyStatus = 0;
+      let lastFormStatus = 0;
 
-      if (batchResponse.ok) {
-        return;
-      }
-
-      let legacyFailedStatus: number | undefined;
-      for (const order of orders) {
-        const legacyResponse = await fetch(this.scriptUrl, {
+      for (const url of variants) {
+        const batchResponse = await fetch(url, {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
           },
-          body: JSON.stringify(this.toLegacyScriptPayload(order))
+          body: JSON.stringify({
+            action: "appendOrders",
+            tabName: this.tabName,
+            orders
+          })
         });
 
-        if (!legacyResponse.ok) {
-          legacyFailedStatus = legacyResponse.status;
-          break;
+        lastBatchStatus = batchResponse.status;
+        if (batchResponse.ok) {
+          return;
         }
-      }
 
-      if (!legacyFailedStatus) {
-        return;
-      }
-
-      const firstOrder = orders[0];
-      const formResponse = await fetch(this.scriptUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded"
-        },
-        body: new URLSearchParams(
-          Object.entries(this.toLegacyScriptPayload(firstOrder)).reduce<Record<string, string>>((acc, [key, value]) => {
-            acc[key] = String(value);
-            return acc;
-          }, {})
-        ).toString()
-      });
-
-      if (formResponse.ok) {
-        for (const order of orders.slice(1)) {
-          const nextResponse = await fetch(this.scriptUrl, {
+        let legacyFailedStatus: number | undefined;
+        for (const order of orders) {
+          const legacyResponse = await fetch(url, {
             method: "POST",
             headers: {
-              "Content-Type": "application/x-www-form-urlencoded"
+              "Content-Type": "application/json"
             },
-            body: new URLSearchParams(
-              Object.entries(this.toLegacyScriptPayload(order)).reduce<Record<string, string>>((acc, [key, value]) => {
-                acc[key] = String(value);
-                return acc;
-              }, {})
-            ).toString()
+            body: JSON.stringify(this.toLegacyScriptPayload(order))
           });
 
-          if (!nextResponse.ok) {
-            throw new Error(`Apps Script error appending orders: ${nextResponse.status}`);
+          if (!legacyResponse.ok) {
+            legacyFailedStatus = legacyResponse.status;
+            break;
           }
         }
 
-        return;
+        if (!legacyFailedStatus) {
+          return;
+        }
+
+        lastLegacyStatus = legacyFailedStatus;
+
+        const firstOrder = orders[0];
+        const formResponse = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          body: new URLSearchParams(
+            Object.entries(this.toLegacyScriptPayload(firstOrder)).reduce<Record<string, string>>((acc, [key, value]) => {
+              acc[key] = String(value);
+              return acc;
+            }, {})
+          ).toString()
+        });
+
+        lastFormStatus = formResponse.status;
+        if (formResponse.ok) {
+          for (const order of orders.slice(1)) {
+            const nextResponse = await fetch(url, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/x-www-form-urlencoded"
+              },
+              body: new URLSearchParams(
+                Object.entries(this.toLegacyScriptPayload(order)).reduce<Record<string, string>>((acc, [key, value]) => {
+                  acc[key] = String(value);
+                  return acc;
+                }, {})
+              ).toString()
+            });
+
+            if (!nextResponse.ok) {
+              throw new Error(`Apps Script error appending orders: ${nextResponse.status}`);
+            }
+          }
+
+          return;
+        }
       }
 
       if (this.sheets) {
@@ -264,7 +290,7 @@ export class SheetsService {
       }
 
       throw new Error(
-        `Apps Script error appending orders: batch ${batchResponse.status}, legacy ${legacyFailedStatus}, form ${formResponse.status}. Service-account key is invalid/unsupported or fallback is unavailable; verify GOOGLE_SCRIPT_URL (/exec) or fix GOOGLE_PRIVATE_KEY format.`
+        `Apps Script error appending orders: batch ${lastBatchStatus}, legacy ${lastLegacyStatus}, form ${lastFormStatus}. Tried URL variants for /exec and /dev. Verify GOOGLE_SCRIPT_URL deployment URL and permissions, or fix GOOGLE_PRIVATE_KEY for API fallback.`
       );
     }
 

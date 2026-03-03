@@ -140,5 +140,6 @@ When `GOOGLE_SCRIPT_URL` is set, this app calls:
 - If unknown products are detected (not in `src/config/productMap.json`), process stops and returns the unknown list.
 - If your current Apps Script only supports single-row `doPost` payloads (like `nroPedido`, `fecha`, `canal`, etc.), this service is now backward-compatible and will send one request per order as fallback.
 - If you get 404 from Apps Script on append, ensure URL is the deployed **/exec** web app URL (not editor URL) and that deployment access allows your requests.
+- The service now auto-tries both `/exec` and `/dev` variants of `GOOGLE_SCRIPT_URL` to reduce deployment URL mismatches.
 
 - Future channels can be added by extending `getParser(channel)`.
