@@ -4,6 +4,7 @@ Production-ready Node.js + TypeScript ETL service for PedidosYa sales reports, w
 
 ## Features
 
+- Simple web upload UI on `GET /upload` with drag & drop area (Upload here / Cargar archivo).
 - XLSX upload endpoint (`POST /upload`) with in-memory processing.
 - PedidosYa parser via scalable `getParser(channel)` design.
 - Hardened upload layer (header auth, file type guard, file size limit).
@@ -107,6 +108,10 @@ When `GOOGLE_SCRIPT_URL` is set, this app calls:
   ```
 
 ## Endpoint
+
+### `GET /upload`
+
+- Renderiza una interfaz web simple para cargar archivo y seleccionar canal (checkbox único: PedidosYa/Rappi/MercadoLibre).
 
 ### `POST /upload`
 
