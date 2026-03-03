@@ -27,6 +27,21 @@ const scriptUrlVariants = (rawUrl: string): string[] => {
   return Array.from(urls);
 };
 
+
+const safeJson = async <T>(response: Response): Promise<T | undefined> => {
+  const contentType = response.headers.get("content-type") || "";
+
+  if (!contentType.toLowerCase().includes("application/json")) {
+    return undefined;
+  }
+
+  try {
+    return (await response.json()) as T;
+  } catch {
+    return undefined;
+  }
+};
+
 export class SheetsService {
   private readonly spreadsheetId: string;
   private readonly tabName: string;
@@ -81,8 +96,10 @@ export class SheetsService {
 
       const getResponse = await fetch(getUrl.toString());
       if (getResponse.ok) {
-        const data = (await getResponse.json()) as ScriptGetOrdersResponse;
-        return this.parseOrderNumbers(data);
+        const data = await safeJson<ScriptGetOrdersResponse>(getResponse);
+        if (data) {
+          return this.parseOrderNumbers(data);
+        }
       }
 
       const postJsonResponse = await fetch(url, {
@@ -97,8 +114,10 @@ export class SheetsService {
       });
 
       if (postJsonResponse.ok) {
-        const data = (await postJsonResponse.json()) as ScriptGetOrdersResponse;
-        return this.parseOrderNumbers(data);
+        const data = await safeJson<ScriptGetOrdersResponse>(postJsonResponse);
+        if (data) {
+          return this.parseOrderNumbers(data);
+        }
       }
 
       const formBody = new URLSearchParams({
@@ -115,8 +134,10 @@ export class SheetsService {
       });
 
       if (postFormResponse.ok) {
-        const data = (await postFormResponse.json()) as ScriptGetOrdersResponse;
-        return this.parseOrderNumbers(data);
+        const data = await safeJson<ScriptGetOrdersResponse>(postFormResponse);
+        if (data) {
+          return this.parseOrderNumbers(data);
+        }
       }
     }
 
