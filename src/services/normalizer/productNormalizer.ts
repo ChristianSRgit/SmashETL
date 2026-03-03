@@ -8,14 +8,47 @@ export interface NormalizedProductResult {
   unknownProducts: string[];
 }
 
-const productEntries = Object.entries(productMap as Record<string, string>);
+const canonicalText = (value: string): string => {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
+interface ProductAliasEntry {
+  source: string;
+  target: string;
+  canonicalSource: string;
+}
+
+const baseEntries = Object.entries(productMap as Record<string, string>);
+
+const productEntries: ProductAliasEntry[] = baseEntries.flatMap(([source, target]) => {
+  const aliases = new Set<string>();
+  aliases.add(source);
+  aliases.add(target);
+
+  // Common PedidosYa prefix variations.
+  if (source.toLowerCase().startsWith("hamburguesa ")) {
+    aliases.add(source.slice("hamburguesa ".length));
+  }
+
+  return Array.from(aliases).map((alias) => ({
+    source: alias,
+    target,
+    canonicalSource: canonicalText(alias)
+  }));
+});
 
 const normalizeProductName = (rawName: string): string | undefined => {
-  const normalizedRaw = rawName.trim().toLowerCase();
+  const canonicalRaw = canonicalText(rawName);
 
-  for (const [sourceName, targetName] of productEntries) {
-    if (normalizedRaw.includes(sourceName.toLowerCase())) {
-      return targetName;
+  for (const entry of productEntries) {
+    if (canonicalRaw.includes(entry.canonicalSource)) {
+      return entry.target;
     }
   }
 
@@ -47,7 +80,7 @@ export const normalizeProducts = (itemsField: string): NormalizedProductResult =
       continue;
     }
 
-    const promoMatch = itemName.match(/promo\s*(\d+)/i);
+    const promoMatch = itemName.match(/promo\s*-?\s*(\d+)/i);
     const multiplier = promoMatch ? Number(promoMatch[1]) : 1;
 
     const normalizedName = normalizeProductName(itemName);
