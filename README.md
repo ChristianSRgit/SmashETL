@@ -82,8 +82,8 @@ npm start
 
 When `GOOGLE_SCRIPT_URL` is set, this app calls:
 
-- `GET <GOOGLE_SCRIPT_URL>?action=getExistingOrderNumbers&tabName=VentasPeYa`
-  - expected JSON response:
+- `GET <GOOGLE_SCRIPT_URL>?action=getExistingOrderNumbers&tabName=VentasPeYa` (opcional; si no existe `doGet`, el backend prueba fallback por `POST`).
+  - expected JSON response when implemented:
     ```json
     { "orderNumbers": [1234, 5678] }
     ```
@@ -138,4 +138,6 @@ When `GOOGLE_SCRIPT_URL` is set, this app calls:
 ## Notes
 
 - If unknown products are detected (not in `src/config/productMap.json`), process stops and returns the unknown list.
+- If your current Apps Script only supports single-row `doPost` payloads (like `nroPedido`, `fecha`, `canal`, etc.), this service is now backward-compatible and will send one request per order as fallback.
+
 - Future channels can be added by extending `getParser(channel)`.

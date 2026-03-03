@@ -3,6 +3,7 @@ import { Order } from "../../types";
 
 interface ScriptGetOrdersResponse {
   orderNumbers?: Array<number | string>;
+  ok?: boolean;
 }
 
 export class SheetsService {
@@ -60,8 +61,8 @@ export class SheetsService {
       return this.parseOrderNumbers(data);
     }
 
-    // Fallback to POST (for doPost-only scripts that may return 404 on GET).
-    const postResponse = await fetch(this.scriptUrl, {
+    // Fallback to POST JSON (for doPost-based scripts with action routing).
+    const postJsonResponse = await fetch(this.scriptUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -72,14 +73,32 @@ export class SheetsService {
       })
     });
 
-    if (postResponse.ok) {
-      const data = (await postResponse.json()) as ScriptGetOrdersResponse;
+    if (postJsonResponse.ok) {
+      const data = (await postJsonResponse.json()) as ScriptGetOrdersResponse;
       return this.parseOrderNumbers(data);
     }
 
-    throw new Error(
-      `Apps Script error fetching order numbers: GET ${getResponse.status}, POST ${postResponse.status}. Verify GOOGLE_SCRIPT_URL deployment and doGet/doPost handlers.`
-    );
+    // Fallback to POST form-encoded parameters for scripts using only e.parameter.
+    const formBody = new URLSearchParams({
+      action: "getExistingOrderNumbers",
+      tabName: this.tabName
+    });
+
+    const postFormResponse = await fetch(this.scriptUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: formBody.toString()
+    });
+
+    if (postFormResponse.ok) {
+      const data = (await postFormResponse.json()) as ScriptGetOrdersResponse;
+      return this.parseOrderNumbers(data);
+    }
+
+    // Do not hard fail upload when duplicates endpoint isn't implemented in Apps Script.
+    return [];
   }
 
   async getExistingOrderNumbers(): Promise<number[]> {
@@ -101,13 +120,28 @@ export class SheetsService {
     return values.map((row) => Number(row[0])).filter((value) => Number.isFinite(value));
   }
 
+  private toLegacyScriptPayload(order: Order) {
+    return {
+      nroPedido: order.orderNumber,
+      fecha: order.date,
+      canal: order.channel,
+      cantidadHamburguesas: order.burgersQty,
+      productos: order.products,
+      montoBruto: order.grossAmount,
+      montoNeto: order.netAmount,
+      metodoDePago: order.paymentMethod,
+      tabName: this.tabName
+    };
+  }
+
   async appendOrders(orders: Order[]): Promise<void> {
     if (orders.length === 0) {
       return;
     }
 
     if (this.scriptUrl) {
-      const response = await fetch(this.scriptUrl, {
+      // Attempt modern batch payload first.
+      const batchResponse = await fetch(this.scriptUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -119,8 +153,23 @@ export class SheetsService {
         })
       });
 
-      if (!response.ok) {
-        throw new Error(`Apps Script error appending orders: ${response.status}`);
+      if (batchResponse.ok) {
+        return;
+      }
+
+      // Fallback: compatible with current doPost script that appends one row from e.parameter/JSON fields.
+      for (const order of orders) {
+        const legacyResponse = await fetch(this.scriptUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(this.toLegacyScriptPayload(order))
+        });
+
+        if (!legacyResponse.ok) {
+          throw new Error(`Apps Script error appending orders: ${legacyResponse.status}`);
+        }
       }
 
       return;
