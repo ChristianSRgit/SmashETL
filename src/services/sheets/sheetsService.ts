@@ -6,6 +6,14 @@ interface ScriptGetOrdersResponse {
   ok?: boolean;
 }
 
+const isDecoderKeyError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return error.message.includes("DECODER routines::unsupported") || error.message.includes("error:1E08010C");
+};
+
 export class SheetsService {
   private readonly spreadsheetId: string;
   private readonly tabName: string;
@@ -107,13 +115,19 @@ export class SheetsService {
     }
 
     if (this.sheets) {
-      const response = await this.sheets.spreadsheets.values.get({
-        spreadsheetId: this.spreadsheetId,
-        range: `${this.tabName}!A:A`
-      });
+      try {
+        const response = await this.sheets.spreadsheets.values.get({
+          spreadsheetId: this.spreadsheetId,
+          range: `${this.tabName}!A:A`
+        });
 
-      const values = response.data.values || [];
-      return values.map((row) => Number(row[0])).filter((value) => Number.isFinite(value));
+        const values = response.data.values || [];
+        return values.map((row) => Number(row[0])).filter((value) => Number.isFinite(value));
+      } catch (error) {
+        if (!isDecoderKeyError(error)) {
+          throw error;
+        }
+      }
     }
 
     return [];
@@ -239,12 +253,18 @@ export class SheetsService {
       }
 
       if (this.sheets) {
-        await this.appendViaSheetsApi(orders);
-        return;
+        try {
+          await this.appendViaSheetsApi(orders);
+          return;
+        } catch (error) {
+          if (!isDecoderKeyError(error)) {
+            throw error;
+          }
+        }
       }
 
       throw new Error(
-        `Apps Script error appending orders: batch ${batchResponse.status}, legacy ${legacyFailedStatus}, form ${formResponse.status}. Verify GOOGLE_SCRIPT_URL (must be /exec deployed web app) or configure valid service-account fallback.`
+        `Apps Script error appending orders: batch ${batchResponse.status}, legacy ${legacyFailedStatus}, form ${formResponse.status}. Service-account key is invalid/unsupported or fallback is unavailable; verify GOOGLE_SCRIPT_URL (/exec) or fix GOOGLE_PRIVATE_KEY format.`
       );
     }
 
