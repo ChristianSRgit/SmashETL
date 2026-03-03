@@ -228,7 +228,8 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
 
     const orders = formatOrders(parseResult.parsedOrders, channel);
     const sheetsService = new SheetsService();
-    const existingOrderNumbers = await sheetsService.getExistingOrderNumbers();
+    const beforeLookup = await sheetsService.getExistingOrderNumbersLookup();
+    const existingOrderNumbers = beforeLookup.orderNumbers;
     const duplicates = findDuplicates(orders, existingOrderNumbers);
     const confirm = String(req.query.confirm || "false").toLowerCase() === "true";
 
@@ -244,15 +245,52 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
 
     await sheetsService.appendOrders(orders);
 
+    let verification: { status: "verified" | "skipped"; message?: string } = { status: "skipped" };
+    const existingBeforeSet = new Set(existingOrderNumbers);
+    const expectedNewOrders = orders
+      .map((order) => order.orderNumber)
+      .filter((orderNumber) => !existingBeforeSet.has(orderNumber));
+
+    if (expectedNewOrders.length === 0) {
+      verification = { status: "verified" };
+    } else if (beforeLookup.source !== "none") {
+      const afterLookup = await sheetsService.getExistingOrderNumbersLookup();
+      if (afterLookup.source !== "none") {
+        const existingAfterSet = new Set(afterLookup.orderNumbers);
+        const missingOrderNumbers = expectedNewOrders.filter((orderNumber) => !existingAfterSet.has(orderNumber));
+
+        if (missingOrderNumbers.length > 0) {
+          throw new Error(
+            `Append verification failed. ${missingOrderNumbers.length} orders were not found in sheet after write. First missing order: ${missingOrderNumbers[0]}`
+          );
+        }
+
+        verification = { status: "verified" };
+      } else {
+        verification = {
+          status: "skipped",
+          message:
+            "Write verification skipped because current configuration cannot read existing orders. Add Apps Script action getExistingOrderNumbers or configure service-account fallback."
+        };
+      }
+    } else {
+      verification = {
+        status: "skipped",
+        message:
+          "Write verification skipped because current configuration cannot read existing orders. Add Apps Script action getExistingOrderNumbers or configure service-account fallback."
+      };
+    }
+
     return res.json({
       inserted: orders.length,
       duplicates,
       unknownProducts: [],
+      verification,
       timeMs: Date.now() - startedAt
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected error";
-    const status = message.includes("Unsupported channel parser") ? 400 : 500;
+    const status = message.includes("Unsupported channel parser") ? 400 : message.includes("Append verification failed") ? 502 : 500;
 
     return res.status(status).json({
       message,
