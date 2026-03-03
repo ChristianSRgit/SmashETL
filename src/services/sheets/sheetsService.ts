@@ -20,20 +20,25 @@ export class SheetsService {
     const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
     const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
 
-    // Initialize Sheets API fallback whenever credentials exist.
+    // Initialize Sheets API fallback only if credentials are present and valid.
     if (clientEmail && privateKey && this.spreadsheetId) {
-      const auth = new google.auth.JWT({
-        email: clientEmail,
-        key: privateKey,
-        scopes: ["https://www.googleapis.com/auth/spreadsheets"]
-      });
+      try {
+        const auth = new google.auth.JWT({
+          email: clientEmail,
+          key: privateKey,
+          scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+        });
 
-      this.sheets = google.sheets({ version: "v4", auth });
+        this.sheets = google.sheets({ version: "v4", auth });
+      } catch {
+        // Ignore invalid service-account key errors when Apps Script URL mode is available.
+        this.sheets = undefined;
+      }
     }
 
     if (!this.scriptUrl && !this.sheets) {
       throw new Error(
-        "Missing Sheets configuration. Set GOOGLE_SCRIPT_URL or service account vars (GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY, GOOGLE_SHEETS_SPREADSHEET_ID)."
+        "Missing or invalid Sheets configuration. Set GOOGLE_SCRIPT_URL or valid service account vars (GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY, GOOGLE_SHEETS_SPREADSHEET_ID)."
       );
     }
   }
@@ -111,8 +116,6 @@ export class SheetsService {
       return values.map((row) => Number(row[0])).filter((value) => Number.isFinite(value));
     }
 
-    // If script duplicate endpoint does not exist and API fallback is unavailable,
-    // continue without duplicates instead of failing the entire upload.
     return [];
   }
 
@@ -178,7 +181,6 @@ export class SheetsService {
         return;
       }
 
-      // Legacy per-order JSON format (your current doPost parser).
       let legacyFailedStatus: number | undefined;
       for (const order of orders) {
         const legacyResponse = await fetch(this.scriptUrl, {
@@ -199,7 +201,6 @@ export class SheetsService {
         return;
       }
 
-      // Extra fallback for scripts expecting form params only.
       const firstOrder = orders[0];
       const formResponse = await fetch(this.scriptUrl, {
         method: "POST",
@@ -215,7 +216,6 @@ export class SheetsService {
       });
 
       if (formResponse.ok) {
-        // If form works, continue sending all orders as form-encoded rows.
         for (const order of orders.slice(1)) {
           const nextResponse = await fetch(this.scriptUrl, {
             method: "POST",
@@ -238,14 +238,13 @@ export class SheetsService {
         return;
       }
 
-      // Final fallback: if Apps Script endpoint is broken but service-account is configured, use API.
       if (this.sheets) {
         await this.appendViaSheetsApi(orders);
         return;
       }
 
       throw new Error(
-        `Apps Script error appending orders: batch ${batchResponse.status}, legacy ${legacyFailedStatus}, form ${formResponse.status}. Verify GOOGLE_SCRIPT_URL (must be /exec deployed web app) or configure service-account fallback.`
+        `Apps Script error appending orders: batch ${batchResponse.status}, legacy ${legacyFailedStatus}, form ${formResponse.status}. Verify GOOGLE_SCRIPT_URL (must be /exec deployed web app) or configure valid service-account fallback.`
       );
     }
 
