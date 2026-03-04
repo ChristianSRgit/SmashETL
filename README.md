@@ -88,21 +88,19 @@ When `GOOGLE_SCRIPT_URL` is set, this app calls:
     ```json
     { "orderNumbers": [1234, 5678] }
     ```
-- `POST <GOOGLE_SCRIPT_URL>` with JSON body (tries multiple compatible payload keys like `orders`, `sales`, and `ventas`):
+- `POST <GOOGLE_SCRIPT_URL>` with JSON body in `registrar-venta` style (first as full sales JSON array, then one-by-one):
   ```json
   {
-    "action": "appendOrders",
-    "tabName": "VentasPeYa",
-    "orders": [
+    "sales": [
       {
-        "orderNumber": 1234,
-        "date": "12/01/2026",
-        "channel": "PedidosYa",
-        "burgersQty": 2,
-        "products": "Big smash doble",
-        "grossAmount": 15990,
-        "netAmount": 12000,
-        "paymentMethod": "Efectivo"
+        "nroPedido": "1234",
+        "fecha": "2026-01-01",
+        "canal": "WhatsApp",
+        "cantidadHamburguesas": 2,
+        "productos": "Cuarto smash simple, Papas noisette x100gr",
+        "montoBruto": 20000,
+        "montoNeto": 18000,
+        "metodoDePago": "efectivo"
       }
     ]
   }
