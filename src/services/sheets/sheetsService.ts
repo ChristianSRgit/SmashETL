@@ -230,6 +230,36 @@ export class SheetsService {
     };
   }
 
+  private toLegacyBatchPayload(orders: Order[]) {
+    const sales = orders.map((order) => this.toLegacyScriptPayload(order));
+
+    return [
+      {
+        action: "appendOrders",
+        tabName: this.tabName,
+        orders
+      },
+      {
+        action: "appendOrders",
+        tabName: this.tabName,
+        sales
+      },
+      {
+        action: "appendSales",
+        tabName: this.tabName,
+        sales
+      },
+      {
+        tabName: this.tabName,
+        sales
+      },
+      {
+        tabName: this.tabName,
+        ventas: sales
+      }
+    ];
+  }
+
   private async appendViaSheetsApi(orders: Order[]): Promise<void> {
     if (!this.sheets) {
       throw new Error("Sheets API fallback unavailable");
@@ -268,20 +298,25 @@ export class SheetsService {
       let lastFormStatus = 0;
 
       for (const url of variants) {
-        const batchResponse = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            action: "appendOrders",
-            tabName: this.tabName,
-            orders
-          })
-        });
+        let batchSucceeded = false;
 
-        lastBatchStatus = batchResponse.status;
-        if (await isScriptWriteSuccess(batchResponse)) {
+        for (const payload of this.toLegacyBatchPayload(orders)) {
+          const batchResponse = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+          });
+
+          lastBatchStatus = batchResponse.status;
+          if (await isScriptWriteSuccess(batchResponse)) {
+            batchSucceeded = true;
+            break;
+          }
+        }
+
+        if (batchSucceeded) {
           return;
         }
 

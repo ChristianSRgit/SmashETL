@@ -14,6 +14,7 @@ Production-ready Node.js + TypeScript ETL service for PedidosYa sales reports, w
   - Product parsing + promo multiplier
   - Product mapping validation (hard stop on unknown products)
   - Duplicate detection against Google Sheets with confirmation flow
+  - Inserts only non-duplicate orders (duplicates are reported but never re-inserted)
 - Supports two output integrations:
   - **Google Apps Script URL** (`GOOGLE_SCRIPT_URL`) – recommended for compatibility with existing projects.
   - **Google Sheets API (service account)** as fallback.
@@ -87,7 +88,7 @@ When `GOOGLE_SCRIPT_URL` is set, this app calls:
     ```json
     { "orderNumbers": [1234, 5678] }
     ```
-- `POST <GOOGLE_SCRIPT_URL>` with body:
+- `POST <GOOGLE_SCRIPT_URL>` with JSON body (tries multiple compatible payload keys like `orders`, `sales`, and `ventas`):
   ```json
   {
     "action": "appendOrders",
