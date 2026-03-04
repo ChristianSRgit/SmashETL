@@ -247,14 +247,14 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
       });
     }
 
-    await sheetsService.appendOrders(orders);
+    const existingBeforeSet = new Set(existingOrderNumbers);
+    const ordersToInsert = orders.filter((order) => !existingBeforeSet.has(order.orderNumber));
+
+    await sheetsService.appendOrders(ordersToInsert);
 
     const verifyWrite = String(req.query.verify || "true").toLowerCase() !== "false";
     let verification: { status: "verified" | "skipped"; message?: string; attempts?: number } = { status: "skipped" };
-    const existingBeforeSet = new Set(existingOrderNumbers);
-    const expectedNewOrders = orders
-      .map((order) => order.orderNumber)
-      .filter((orderNumber) => !existingBeforeSet.has(orderNumber));
+    const expectedNewOrders = ordersToInsert.map((order) => order.orderNumber);
 
     if (!verifyWrite) {
       verification = {
@@ -303,7 +303,7 @@ uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Re
     }
 
     return res.json({
-      inserted: orders.length,
+      inserted: ordersToInsert.length,
       duplicates,
       unknownProducts: [],
       verification,
