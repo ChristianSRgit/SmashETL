@@ -5,6 +5,11 @@ interface ScriptGetOrdersResponse {
   orderNumbers?: Array<number | string>;
 }
 
+export interface ExistingOrderNumbersLookup {
+  orderNumbers: number[];
+  source: "script" | "sheetsApi" | "none";
+}
+
 const isDecoderKeyError = (error: unknown): boolean => {
   if (!(error instanceof Error)) {
     return false;
@@ -40,6 +45,40 @@ const safeJson = async <T>(response: Response): Promise<T | undefined> => {
   } catch {
     return undefined;
   }
+};
+
+const isHtmlResponse = (response: Response, body: string): boolean => {
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  if (contentType.includes("text/html")) {
+    return true;
+  }
+
+  const trimmed = body.trim().toLowerCase();
+  return trimmed.startsWith("<!doctype html") || trimmed.startsWith("<html");
+};
+
+const isAuthRedirectResponse = (response: Response, body: string): boolean => {
+  const finalUrl = response.url.toLowerCase();
+  if (finalUrl.includes("accounts.google.com")) {
+    return true;
+  }
+
+  const normalized = body.toLowerCase();
+  return normalized.includes("accounts.google.com") && normalized.includes("signin");
+};
+
+const isScriptWriteSuccess = async (response: Response): Promise<boolean> => {
+  if (!response.ok) {
+    return false;
+  }
+
+  const body = await response.text();
+
+  if (isHtmlResponse(response, body) || isAuthRedirectResponse(response, body)) {
+    return false;
+  }
+
+  return true;
 };
 
 export class SheetsService {
@@ -144,10 +183,10 @@ export class SheetsService {
     return undefined;
   }
 
-  async getExistingOrderNumbers(): Promise<number[]> {
+  async getExistingOrderNumbersLookup(): Promise<ExistingOrderNumbersLookup> {
     const fromScript = await this.getOrderNumbersViaScript();
-    if (fromScript) {
-      return fromScript;
+    if (fromScript !== undefined) {
+      return { orderNumbers: fromScript, source: "script" };
     }
 
     if (this.sheets) {
@@ -158,7 +197,10 @@ export class SheetsService {
         });
 
         const values = response.data.values || [];
-        return values.map((row) => Number(row[0])).filter((value) => Number.isFinite(value));
+        return {
+          orderNumbers: values.map((row) => Number(row[0])).filter((value) => Number.isFinite(value)),
+          source: "sheetsApi"
+        };
       } catch (error) {
         if (!isDecoderKeyError(error)) {
           throw error;
@@ -166,21 +208,58 @@ export class SheetsService {
       }
     }
 
-    return [];
+    return { orderNumbers: [], source: "none" };
   }
 
-  private toLegacyScriptPayload(order: Order) {
+  async getExistingOrderNumbers(): Promise<number[]> {
+    const lookup = await this.getExistingOrderNumbersLookup();
+    return lookup.orderNumbers;
+  }
+
+  private toRegistrarVentaPayload(order: Order) {
     return {
-      nroPedido: order.orderNumber,
+      nroPedido: String(order.orderNumber),
       fecha: order.date,
       canal: order.channel,
       cantidadHamburguesas: order.burgersQty,
       productos: order.products,
       montoBruto: order.grossAmount,
       montoNeto: order.netAmount,
-      metodoDePago: order.paymentMethod,
+      metodoDePago: order.paymentMethod
+    };
+  }
+
+  private toLegacyScriptPayload(order: Order) {
+    return {
+      ...this.toRegistrarVentaPayload(order),
       tabName: this.tabName
     };
+  }
+
+  private buildSalesBatchPayloads(orders: Order[]) {
+    const sales = orders.map((order) => this.toRegistrarVentaPayload(order));
+
+    return [
+      {
+        action: "appendSales",
+        tabName: this.tabName,
+        sales
+      },
+      {
+        action: "appendSales",
+        tabName: this.tabName,
+        ventas: sales
+      },
+      {
+        tabName: this.tabName,
+        sales
+      },
+      {
+        tabName: this.tabName,
+        ventas: sales
+      },
+      sales
+    ];
   }
 
   private async appendViaSheetsApi(orders: Order[]): Promise<void> {
@@ -217,26 +296,54 @@ export class SheetsService {
     if (this.scriptUrl) {
       const variants = scriptUrlVariants(this.scriptUrl);
       let lastBatchStatus = 0;
+      let lastRegistrarStatus = 0;
       let lastLegacyStatus = 0;
       let lastFormStatus = 0;
 
       for (const url of variants) {
-        const batchResponse = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            action: "appendOrders",
-            tabName: this.tabName,
-            orders
-          })
-        });
+        let batchSucceeded = false;
 
-        lastBatchStatus = batchResponse.status;
-        if (batchResponse.ok) {
+        for (const payload of this.buildSalesBatchPayloads(orders)) {
+          const batchResponse = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+          });
+
+          lastBatchStatus = batchResponse.status;
+          if (await isScriptWriteSuccess(batchResponse)) {
+            batchSucceeded = true;
+            break;
+          }
+        }
+
+        if (batchSucceeded) {
           return;
         }
+
+        let registrarFailedStatus: number | undefined;
+        for (const order of orders) {
+          const registrarResponse = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(this.toRegistrarVentaPayload(order))
+          });
+
+          if (!(await isScriptWriteSuccess(registrarResponse))) {
+            registrarFailedStatus = registrarResponse.status;
+            break;
+          }
+        }
+
+        if (!registrarFailedStatus) {
+          return;
+        }
+
+        lastRegistrarStatus = registrarFailedStatus;
 
         let legacyFailedStatus: number | undefined;
         for (const order of orders) {
@@ -248,7 +355,7 @@ export class SheetsService {
             body: JSON.stringify(this.toLegacyScriptPayload(order))
           });
 
-          if (!legacyResponse.ok) {
+          if (!(await isScriptWriteSuccess(legacyResponse))) {
             legacyFailedStatus = legacyResponse.status;
             break;
           }
@@ -275,7 +382,7 @@ export class SheetsService {
         });
 
         lastFormStatus = formResponse.status;
-        if (formResponse.ok) {
+        if (await isScriptWriteSuccess(formResponse)) {
           for (const order of orders.slice(1)) {
             const nextResponse = await fetch(url, {
               method: "POST",
@@ -290,7 +397,7 @@ export class SheetsService {
               ).toString()
             });
 
-            if (!nextResponse.ok) {
+            if (!(await isScriptWriteSuccess(nextResponse))) {
               throw new Error(`Apps Script error appending orders: ${nextResponse.status}`);
             }
           }
@@ -311,7 +418,7 @@ export class SheetsService {
       }
 
       throw new Error(
-        `Apps Script error appending orders: batch ${lastBatchStatus}, legacy ${lastLegacyStatus}, form ${lastFormStatus}. Tried URL variants for /exec and /dev. Verify GOOGLE_SCRIPT_URL deployment URL and permissions, or fix GOOGLE_PRIVATE_KEY for API fallback.`
+        `Apps Script error appending orders: batch ${lastBatchStatus}, registrarVenta ${lastRegistrarStatus}, legacy ${lastLegacyStatus}, form ${lastFormStatus}. Tried URL variants for /exec and /dev. Verify GOOGLE_SCRIPT_URL deployment URL and permissions, or fix GOOGLE_PRIVATE_KEY for API fallback.`
       );
     }
 
